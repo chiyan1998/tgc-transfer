@@ -30,8 +30,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files：只允许提交模板，其余一律排除（密钥安全，见 architecture §7）
 .env*
+!.env.example
+
+# 本地数据（SQLite + 备份）
+data/
 
 # vercel
 .vercel
