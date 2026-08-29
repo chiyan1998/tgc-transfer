@@ -94,12 +94,53 @@ export const articlesRepo = {
     return (getDb().prepare("SELECT COUNT(*) AS c FROM articles WHERE created_at > ?").get(sinceUtc) as { c: number })
       .c;
   },
-  /** 信息流：仅返回当前用户订阅源的文章，按入库时间倒序游标分页 */
+  /** 某源下尚无概要的文章 id（基线回填 / 批量摘要用） */
+  listUnbriefedIds(sourceId: number): number[] {
+    const rows = getDb()
+      .prepare(
+        `SELECT a.id FROM articles a
+         WHERE a.source_id = ? AND NOT EXISTS (SELECT 1 FROM paper_briefs b WHERE b.article_id = a.id)
+         ORDER BY a.id`
+      )
+      .all(sourceId) as { id: number }[];
+    return rows.map((r) => r.id);
+  },
+  /** 用户订阅范围内、指定来源与日期区间中尚无概要的文章（批量摘要/预览用） */
+  listUnbriefedInScope(opts: {
+    userId: number;
+    sourceIds: number[];
+    range?: "today" | "week" | "month" | "quarter" | "halfyear" | "all";
+  }): { id: number; source_id: number }[] {
+    if (!opts.sourceIds.length) return [];
+    const pubExpr = "COALESCE(a.published_online, a.published_print, a.published_at, a.created_at)";
+    const where: string[] = [
+      "sub.user_id = @userId",
+      `a.source_id IN (${opts.sourceIds.map((_, i) => `@sid${i}`).join(",")})`,
+      "NOT EXISTS (SELECT 1 FROM paper_briefs b WHERE b.article_id = a.id)",
+    ];
+    const params: Record<string, unknown> = { userId: opts.userId };
+    opts.sourceIds.forEach((sid, i) => {
+      params[`sid${i}`] = sid;
+    });
+    const rangeDays: Record<string, number> = { today: 0, week: 7, month: 30, quarter: 90, halfyear: 180 };
+    if (opts.range === "today") where.push(`date(${pubExpr}) = date('now')`);
+    else if (opts.range && opts.range in rangeDays) where.push(`${pubExpr} >= datetime('now', '-${rangeDays[opts.range]} days')`);
+    return getDb()
+      .prepare(
+        `SELECT a.id, a.source_id FROM articles a
+         JOIN subscriptions sub ON sub.source_id = a.source_id
+         WHERE ${where.join(" AND ")}
+         ORDER BY a.id`
+      )
+      .all(params) as { id: number; source_id: number }[];
+  },
+  /** 信息流：仅返回当前用户订阅源的文章，按指定字段游标分页（键集排序，游标统一以 a.id 定位） */
   listFeed(opts: {
     userId: number;
     cursor?: number;
     limit?: number;
     sourceId?: number;
+    sourceIds?: number[];
     range?: "today" | "week" | "month" | "quarter" | "halfyear" | "all";
     oaOnly?: boolean;
     /** 来源类型白名单过滤（journal / arxiv / nber） */
@@ -108,17 +149,52 @@ export const articlesRepo = {
     types?: string[];
     /** 搜索：英文标题 / 中文标题 / 来源名 */
     q?: string;
+    /** 排序字段（默认入库时间） */
+    sort?: "ingest" | "published" | "source" | "brief";
+    /** 排序方向（默认降序） */
+    dir?: "asc" | "desc";
   }): ArticleRow[] {
     const limit = Math.min(opts.limit ?? 20, 100);
-    // 发表时间优先：online → print → 通用 → 入库时间兜底
+    const sort = opts.sort ?? "ingest";
+    const dir = opts.dir ?? "desc";
+    // 发表时间优先：online → print → 通用 → 入库时间兜底；摘要状态 1=已摘要（降序时在前）
     const pubExpr = "COALESCE(a.published_online, a.published_print, a.published_at, a.created_at)";
-    const where: string[] = ["a.id < @cursor", "sub.user_id = @userId"];
+    const SORT_EXPR: Record<string, string> = {
+      ingest: "a.id",
+      published: pubExpr,
+      source: "src.name",
+      brief: "CASE WHEN EXISTS (SELECT 1 FROM paper_briefs pb WHERE pb.article_id = a.id) THEN 1 ELSE 0 END",
+    };
+    const sortExpr = SORT_EXPR[sort];
+    const where: string[] = ["sub.user_id = @userId"];
     const params: Record<string, unknown> = {
-      cursor: opts.cursor ?? Number.MAX_SAFE_INTEGER,
       userId: opts.userId,
       limit,
     };
-    if (opts.sourceId) where.push("a.source_id = @sourceId");
+    // 游标键集：(sortExpr, a.id) < / > (@sortVal, @cursor)；sortVal 回查游标行取得（来源名同值跨界允许轻微误差）
+    if (opts.cursor != null) {
+      let sortVal: unknown = opts.cursor;
+      if (sort !== "ingest") {
+        const row = getDb()
+          .prepare(`SELECT ${sortExpr} AS v FROM articles a JOIN sources src ON src.id = a.source_id WHERE a.id = ?`)
+          .get(opts.cursor) as { v: unknown } | undefined;
+        if (row == null) {
+          // 游标行已不存在：退化为仅按 a.id 键集翻页，保持可用
+          where.push(dir === "desc" ? "a.id < @cursor" : "a.id > @cursor");
+          params.cursor = opts.cursor;
+        } else {
+          sortVal = row.v;
+        }
+      } else {
+        params.cursor = opts.cursor;
+        where.push(dir === "desc" ? "a.id < @cursor" : "a.id > @cursor");
+      }
+      if (params.sortVal === undefined && params.cursor === undefined) {
+        params.cursor = opts.cursor;
+        params.sortVal = sortVal;
+        where.push(dir === "desc" ? `(${sortExpr}, a.id) < (@sortVal, @cursor)` : `(${sortExpr}, a.id) > (@sortVal, @cursor)`);
+      }
+    }
     if (opts.oaOnly) where.push("a.is_oa = 1");
     const rangeDays: Record<string, number> = { today: 0, week: 7, month: 30, quarter: 90, halfyear: 180 };
     if (opts.range === "today") where.push(`date(${pubExpr}) = date('now')`);
@@ -144,7 +220,14 @@ export const articlesRepo = {
       where.push("(a.title LIKE @q OR b.title_zh LIKE @q OR src.name LIKE @q)");
       params.q = `%${opts.q.trim()}%`;
     }
-    params.sourceId = opts.sourceId ?? null;
+    if (opts.sourceId) where.push("a.source_id = @sourceId");
+    if (opts.sourceId) params.sourceId = opts.sourceId;
+    if (opts.sourceIds?.length) {
+      where.push(`a.source_id IN (${opts.sourceIds.map((_, i) => `@fsid${i}`).join(",")})`);
+      opts.sourceIds.forEach((sid, i) => {
+        params[`fsid${i}`] = sid;
+      });
+    }
     return getDb()
       .prepare(
         `SELECT a.* FROM articles a
@@ -152,7 +235,7 @@ export const articlesRepo = {
          JOIN sources src ON src.id = a.source_id
          LEFT JOIN paper_briefs b ON b.article_id = a.id
          WHERE ${where.join(" AND ")}
-         ORDER BY a.id DESC LIMIT @limit`
+         ORDER BY ${sortExpr} ${dir.toUpperCase()}, a.id ${dir.toUpperCase()} LIMIT @limit`
       )
       .all(params) as ArticleRow[];
   },

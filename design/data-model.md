@@ -249,11 +249,25 @@ erDiagram
 
 额度核算不加列：按 `llm_usage.task_type='brief'` JOIN `articles → sources(is_baseline=0) → subscriptions(user_id)` 计当日 DISTINCT 文章数。
 
+### note_materials — 读书笔记材料（007 迁移）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | INTEGER PK | |
+| user_id | INTEGER FK→users | ON DELETE CASCADE |
+| kind | TEXT | `main`（论文正文，仅 .pdf/.epub）/ `attachment`（附加材料，仅 .pdf/.zip），CHECK 约束 |
+| original_name | TEXT | 原始文件名 |
+| stored_path | TEXT | 相对路径 `YYYYMM/<uuid>.<ext>`，文件落盘 `data/note-materials/` |
+| size | INTEGER | 字节数（单文件 ≤50MB） |
+| created_at | TEXT | UTC |
+
+索引：`idx_note_materials_user(user_id, created_at)`。
+
 ## 3. 数据库管理模块（db-manager.ts）
 
 | 能力 | 说明 |
 | --- | --- |
-| 建库与迁移 | 启动时按文件名顺序扫描 `schema/` 下 numbered SQL（001…006），`schema_version` 表记录已应用版本，逐版本事务应用 |
+| 建库与迁移 | 启动时按文件名顺序扫描 `schema/` 下 numbered SQL（001…007），`schema_version` 表记录已应用版本，逐版本事务应用 |
 | 连接配置 | WAL 模式、busy_timeout、外键开启 |
 | 备份 | `backup()` → SQLite Online Backup API 复制到 `data/backups/YYYYMMDD-HHmm.db`；admin 手动触发，后续可加定时 |
 | 统计 | 各表行数、库体积、最近抓取/任务情况，供 admin 面板 |
@@ -267,6 +281,6 @@ erDiagram
 
 ## 5. 预留说明
 
-- 学术会议 / 基金资助 / 项目管理 / 阅读笔记四个预留模块**当前不建表**；启用时经 db-manager 追加独立 numbered 迁移，与现有表解耦（见 architecture §4）。
+- 学术会议 / 基金资助 / 项目管理三个预留模块**当前不建表**；启用时经 db-manager 追加独立 numbered 迁移，与现有表解耦（见 architecture §4）。阅读笔记已起步：007 迁移建 `note_materials` 表承接材料上传，笔记自动生成待后续迁移扩展。
 - `sources.kind` 已预留 `ssrn` 取值；书籍（`book`）复用 articles 表，仅 `isbn` / `cover_url` 为书籍专属字段。
 - 书籍条目不产生 `article_resources` 与深度阅读记录（无全文）。

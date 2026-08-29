@@ -14,6 +14,10 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState("");
   const [loading, setLoading] = useState(true);
   const [account, setAccount] = useState<AccountInfo | null>(null);
+  // 阅读笔记：Obsidian vault 目录
+  const [vaultPath, setVaultPath] = useState("");
+  const [vaultMsg, setVaultMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [vaultBusy, setVaultBusy] = useState(false);
 
   useEffect(() => {
     fetch("/api/settings")
@@ -23,6 +27,7 @@ export default function SettingsPage() {
           setAutoRefresh(d.data.autoRefreshOnLogin);
           setIntervalMin(d.data.refreshIntervalMin);
           setDefaultLang(d.data.defaultLang);
+          setVaultPath(d.data.obsidianVaultPath ?? "");
           if (d.data.account) setAccount(d.data.account);
         }
       })
@@ -43,6 +48,40 @@ export default function SettingsPage() {
     });
     setSaved(res.ok ? "已保存" : "保存失败");
     setTimeout(() => setSaved(""), 3000);
+  }
+
+  async function saveVault() {
+    setVaultBusy(true);
+    setVaultMsg(null);
+    const res = await fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ obsidianVaultPath: vaultPath.trim() || null }),
+    });
+    setVaultBusy(false);
+    setVaultMsg(res.ok ? { ok: true, text: "已保存" } : { ok: false, text: "保存失败" });
+  }
+
+  async function checkVault() {
+    const p = vaultPath.trim();
+    if (!p) {
+      setVaultMsg({ ok: false, text: "请先填写目录路径" });
+      return;
+    }
+    setVaultBusy(true);
+    setVaultMsg(null);
+    const res = await fetch("/api/settings/vault-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: p }),
+    });
+    const d = await res.json().catch(() => null);
+    setVaultBusy(false);
+    if (!res.ok || !d?.data) {
+      setVaultMsg({ ok: false, text: String(d?.error ?? "检查失败") });
+      return;
+    }
+    setVaultMsg(d.data.ok ? { ok: true, text: "校验通过：是一个有效的 Obsidian 仓库" } : { ok: false, text: d.data.reason });
   }
 
   if (loading) return <p className="text-stone-400">加载中…</p>;
@@ -94,10 +133,39 @@ export default function SettingsPage() {
         </div>
 
         <div>
-          <h2 className="mb-3 font-semibold">阅读笔记（预留）</h2>
-          <p className="text-sm text-stone-500">
-            Obsidian vault 目录将在阅读笔记平台开发完成后启用，当前无需配置。
+          <h2 className="mb-3 font-semibold">阅读笔记 · Obsidian 目录</h2>
+          <p className="mb-3 text-sm text-stone-500">
+            填写本机 Obsidian 仓库（vault）根目录，后续自动生成的阅读笔记会写入这里。
+            校验仅在应用运行于本机时有效；云端部署后无法访问你的本地目录。
           </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={vaultPath}
+              onChange={(e) => {
+                setVaultPath(e.target.value);
+                setVaultMsg(null);
+              }}
+              placeholder="例如 /Users/you/Documents/MyVault"
+              className="w-96 max-w-full rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm focus:border-amber-500 focus:outline-none"
+            />
+            <button
+              onClick={saveVault}
+              disabled={vaultBusy}
+              className="rounded-lg bg-amber-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+            >
+              保存
+            </button>
+            <button
+              onClick={checkVault}
+              disabled={vaultBusy}
+              className="rounded-lg border border-amber-500 px-4 py-1.5 text-sm font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+            >
+              {vaultBusy ? "检查中…" : "检查"}
+            </button>
+          </div>
+          {vaultMsg && (
+            <p className={`mt-2 text-sm ${vaultMsg.ok ? "text-green-600" : "text-red-600"}`}>{vaultMsg.text}</p>
+          )}
         </div>
 
         <div className="flex items-center gap-3">

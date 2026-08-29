@@ -49,7 +49,7 @@ export const MODULES: ModuleDef[] = [
     route: "/notes",
     label: "阅读笔记",
     labelEn: "Notes",
-    status: "planned",
-    description: "用自研阅读技能生成论文阅读笔记，写入本地 Obsidian；支持上传 PDF 生成阅读报告",
+    status: "active",
+    description: "上传论文正文与附加材料，后续自动生成阅读笔记并写入本地 Obsidian",
   },
 ];

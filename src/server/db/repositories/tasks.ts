@@ -4,12 +4,14 @@ import { getDb } from "../db-manager";
 export type TaskType = "brief" | "pdf_probe" | "resource_discovery" | "deep_read";
 export type TaskStatus = "pending" | "processing" | "done" | "failed" | "no_pdf";
 
-/** 概要任务优先级（数值大优先）：手动 > 基线 > 个人优先源 > 个人普通 */
+/** 概要任务优先级（数值大优先）：手动 > 基线 > 个人优先源 > 个人普通 > 个人批量 */
 export const BRIEF_PRIORITY = {
   manual: 8,
   baseline: 6,
   personalPriority: 4,
   personal: 2,
+  /** 批量生成：最低优先，不阻塞手动单篇 */
+  personalBatch: 1,
 } as const;
 
 export interface TaskRow {
@@ -39,6 +41,26 @@ export const tasksRepo = {
       .prepare("INSERT INTO llm_tasks (type, article_id, priority, user_id) VALUES (?, ?, ?, ?)")
       .run(type, articleId, priority, userId);
     return Number(info.lastInsertRowid);
+  },
+  /** 将某源未开始的非基线概要任务升级为基线任务（设基线时避免历史个人任务残留不归全局模型管） */
+  upgradeToBaselineForSource(sourceId: number): number {
+    return getDb()
+      .prepare(
+        `UPDATE llm_tasks SET priority = ?, user_id = NULL
+         WHERE type = 'brief' AND status = 'pending' AND priority < ?
+           AND article_id IN (SELECT id FROM articles WHERE source_id = ?)`
+      )
+      .run(BRIEF_PRIORITY.baseline, BRIEF_PRIORITY.baseline, sourceId).changes;
+  },
+  /** 取消某源未开始的基线 brief 任务（取消基线标记时；仍归个人的任务不受影响）；返回取消数。
+   * 注：llm_tasks.status 无 cancelled 枚举（CHECK 约束），直接删除 pending 行，效果等价 */
+  cancelPendingBaselineForSource(sourceId: number): number {
+    return getDb()
+      .prepare(
+        `DELETE FROM llm_tasks WHERE type = 'brief' AND status = 'pending' AND user_id IS NULL
+         AND article_id IN (SELECT id FROM articles WHERE source_id = ?)`
+      )
+      .run(sourceId).changes;
   },
   /** 当日额度已超：推迟到次日零点（本地时区），不计重试 */
   deferUntilTomorrow(id: number): void {

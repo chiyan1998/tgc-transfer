@@ -1,6 +1,5 @@
-import { MODULES } from "@/lib/modules";
-import { ReservedModule } from "@/components/ReservedModule";
+import { Notes } from "@/components/Notes";
 
 export default function NotesPage() {
-  return <ReservedModule module={MODULES.find((m) => m.key === "notes")!} />;
+  return <Notes />;
 }

@@ -83,6 +83,12 @@ export function Feed() {
   const [groups, setGroups] = useState<string[]>([]); // journal / working
   const [kindSel, setKindSel] = useState<string[]>([]); // journal / arxiv / nber
   const [typeSel, setTypeSel] = useState<string[]>([]); // 论文类型五分类
+  const [batchOpen, setBatchOpen] = useState(false);
+  // 排序与具体来源筛选（动态读已订阅源）
+  const [sort, setSort] = useState<"ingest" | "published" | "source" | "brief">("ingest");
+  const [dir, setDir] = useState<"asc" | "desc">("desc");
+  const [availSources, setAvailSources] = useState<SourceOption[]>([]);
+  const [sourceSel, setSourceSel] = useState<number[]>([]);
   const initialLoaded = useRef(false);
 
   // 生效的来源类型：论文类别勾选 ∪ 来源类型勾选
@@ -93,7 +99,8 @@ export function Feed() {
       ...kindSel,
     ])
   );
-  const filterActive = effectiveKinds.length > 0 || typeSel.length > 0 || q !== "";
+  const filterActive =
+    effectiveKinds.length > 0 || typeSel.length > 0 || q !== "" || sourceSel.length > 0;
 
   const loadStats = useCallback(async () => {
     const res = await fetch("/api/stats/feed");
@@ -104,11 +111,12 @@ export function Feed() {
   const load = useCallback(
     async (reset = false) => {
       setLoading(true);
-      const params = new URLSearchParams({ limit: "20", range });
+      const params = new URLSearchParams({ limit: "20", range, sort, dir });
       if (oaOnly) params.set("oa", "1");
       if (q) params.set("q", q);
       if (effectiveKinds.length) params.set("kinds", effectiveKinds.join(","));
       if (typeSel.length) params.set("types", typeSel.join(","));
+      if (sourceSel.length) params.set("sources", sourceSel.join(","));
       if (!reset && cursor) params.set("cursor", String(cursor));
       const res = await fetch(`/api/articles?${params}`);
       const data = await res.json().catch(() => null);
@@ -121,7 +129,18 @@ export function Feed() {
       setCursor(data.data.nextCursor);
       setNotice("");
     },
-    [cursor, items, range, oaOnly, q, effectiveKinds.join(","), typeSel.join(",")]
+    [
+      cursor,
+      items,
+      range,
+      oaOnly,
+      q,
+      sort,
+      dir,
+      effectiveKinds.join(","),
+      typeSel.join(","),
+      sourceSel.join(","),
+    ]
   );
 
   // 首次加载 + 登录自动刷新（每个浏览器会话一次，见 product-design §5）
@@ -148,12 +167,29 @@ export function Feed() {
   }, [searchInput]);
 
   // 筛选条件变化后重置加载（首次挂载由上方 effect 负责）
-  const filterKey = `${range}|${oaOnly}|${q}|${effectiveKinds.join(",")}|${typeSel.join(",")}`;
+  const filterKey = `${range}|${oaOnly}|${q}|${effectiveKinds.join(",")}|${typeSel.join(",")}|${sort}|${dir}|${sourceSel.join(",")}`;
   useEffect(() => {
     if (!initialLoaded.current) return;
     load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey]);
+
+  // 打开筛选面板时加载已订阅源列表（具体来源多选）
+  useEffect(() => {
+    if (!filterOpen || availSources.length > 0) return;
+    (async () => {
+      const res = await fetch("/api/sources");
+      const d = await res.json().catch(() => null);
+      if (res.ok && d?.data) setAvailSources(d.data.sources ?? []);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterOpen]);
+
+  // 统计行 30 秒静默轮询：批量/回填入队后摘要数字自然增长，卸载时清理
+  useEffect(() => {
+    const t = setInterval(() => loadStats(), 30_000);
+    return () => clearInterval(t);
+  }, [loadStats]);
 
   async function manualRefresh() {
     setRefreshing(true);
@@ -175,6 +211,7 @@ export function Feed() {
     setGroups([]);
     setKindSel([]);
     setTypeSel([]);
+    setSourceSel([]);
     setSearchInput("");
     setQ("");
   }
@@ -183,13 +220,21 @@ export function Feed() {
     <div className="mx-auto max-w-3xl">
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-bold">文献集市</h1>
-        <button
-          onClick={manualRefresh}
-          disabled={refreshing}
-          className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
-        >
-          {refreshing ? "刷新中…" : "手动刷新"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setBatchOpen(true)}
+            className="rounded-lg border border-amber-500 bg-white px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-50"
+          >
+            批量生成摘要
+          </button>
+          <button
+            onClick={manualRefresh}
+            disabled={refreshing}
+            className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+          >
+            {refreshing ? "刷新中…" : "手动刷新"}
+          </button>
+        </div>
       </div>
 
       {/* 统计行：总数 / 已摘要数 / 上次自动更新（北京时间） */}
@@ -230,6 +275,24 @@ export function Feed() {
           <input type="checkbox" checked={oaOnly} onChange={(e) => setOaOnly(e.target.checked)} />
           仅开放获取
         </label>
+        <select
+          value={sort}
+          onChange={(e) => setSort(e.target.value as typeof sort)}
+          className="rounded-lg border border-stone-300 bg-white px-2 py-1.5"
+          title="排序字段"
+        >
+          <option value="ingest">按入库时间</option>
+          <option value="published">按发表日期</option>
+          <option value="source">按来源名</option>
+          <option value="brief">按摘要状态</option>
+        </select>
+        <button
+          onClick={() => setDir(dir === "desc" ? "asc" : "desc")}
+          className="rounded-lg border border-stone-300 bg-white px-2.5 py-1.5 text-stone-600 hover:bg-stone-100"
+          title={dir === "desc" ? "当前降序，点击切换为升序" : "当前升序，点击切换为降序"}
+        >
+          {dir === "desc" ? "↓ 降序" : "↑ 升序"}
+        </button>
         <button
           onClick={() => setFilterOpen(!filterOpen)}
           className={`rounded-lg border px-3 py-1.5 ${
@@ -267,6 +330,32 @@ export function Feed() {
             selected={typeSel}
             onChange={setTypeSel}
           />
+          <div className="flex items-start gap-2">
+            <span className="w-16 shrink-0 pt-1 text-xs font-semibold text-stone-500">具体来源</span>
+            <div className="max-h-40 flex-1 overflow-auto">
+              {availSources.length === 0 && (
+                <p className="py-1 text-xs text-stone-400">暂无已订阅来源</p>
+              )}
+              <div className="flex flex-wrap gap-2 pb-1">
+                {availSources.map((s) => {
+                  const on = sourceSel.includes(s.id);
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() =>
+                        setSourceSel(on ? sourceSel.filter((x) => x !== s.id) : [...sourceSel, s.id])
+                      }
+                      className={`rounded-full px-3 py-1 text-xs ${
+                        on ? "bg-amber-500 font-medium text-white" : "bg-stone-100 text-stone-600 hover:bg-stone-200"
+                      }`}
+                    >
+                      {s.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -308,6 +397,181 @@ export function Feed() {
           </button>
         </div>
       )}
+
+      {batchOpen && (
+        <BatchBriefModal
+          onClose={() => setBatchOpen(false)}
+          onDone={(msg) => {
+            setBatchOpen(false);
+            setNotice(msg);
+            loadStats();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+interface SourceOption {
+  id: number;
+  kind: string;
+  name: string;
+  is_baseline: number;
+}
+
+const BATCH_KIND_LABEL: Record<string, string> = {
+  journal: "期刊",
+  arxiv: "arXiv",
+  nber: "NBER",
+  book: "图书",
+};
+
+/** 批量生成摘要弹窗：来源多选 + 日期范围 → 预览篇数 → 确认入队 */
+function BatchBriefModal({ onClose, onDone }: { onClose: () => void; onDone: (msg: string) => void }) {
+  const [sources, setSources] = useState<SourceOption[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [sel, setSel] = useState<number[]>([]);
+  const [range, setRange] = useState<Range>("all");
+  const [preview, setPreview] = useState<{ count: number; skippedQuota: number; noModel: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const res = await fetch("/api/sources");
+      const d = await res.json().catch(() => null);
+      if (res.ok && d?.data) setSources(d.data.sources ?? []);
+      setLoaded(true);
+    })();
+  }, []);
+
+  function toggleSource(id: number) {
+    setPreview(null);
+    setMsg("");
+    setSel((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  async function doPreview() {
+    setBusy(true);
+    setMsg("");
+    const res = await fetch("/api/articles/batch-brief/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceIds: sel, range }),
+    });
+    const d = await res.json().catch(() => null);
+    setBusy(false);
+    if (!res.ok || !d?.data) {
+      setMsg(String(d?.error ?? "预览失败，请稍后重试"));
+      return;
+    }
+    setPreview(d.data);
+  }
+
+  async function doRun() {
+    setBusy(true);
+    setMsg("");
+    const res = await fetch("/api/articles/batch-brief", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceIds: sel, range }),
+    });
+    const d = await res.json().catch(() => null);
+    setBusy(false);
+    if (!res.ok || !d?.data) {
+      setMsg(String(d?.error ?? "提交失败，请稍后重试"));
+      return;
+    }
+    const r = d.data as { count: number; skippedQuota: number };
+    onDone(`已加入队列 ${r.count} 篇，概要将陆续生成${r.skippedQuota ? `（另有 ${r.skippedQuota} 篇受今日额度限制跳过）` : ""}`);
+  }
+
+  const confirmDisabled = busy || !preview || preview.count === 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-xl rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">批量生成摘要</h3>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-600">
+            ✕
+          </button>
+        </div>
+        <p className="mb-3 text-xs text-stone-500">
+          对选定来源中尚无概要的文章一键入队。基线来源走全局模型；其余来源使用你的个人概要模型并计入每日额度。
+        </p>
+
+        <div className="mb-2 text-sm font-medium text-stone-700">选择来源（{sel.length}/{sources.length}）</div>
+        <div className="mb-3 max-h-52 space-y-1 overflow-auto rounded-lg border border-stone-200 p-2">
+          {!loaded && <p className="p-2 text-xs text-stone-400">加载中…</p>}
+          {loaded && sources.length === 0 && <p className="p-2 text-xs text-stone-400">还没有订阅任何来源，请先去订阅中心订阅。</p>}
+          {sources.map((s) => {
+            const on = sel.includes(s.id);
+            return (
+              <label key={s.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-stone-50">
+                <input type="checkbox" checked={on} onChange={() => toggleSource(s.id)} />
+                <span className="w-14 shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-center text-xs text-stone-500">
+                  {BATCH_KIND_LABEL[s.kind] ?? s.kind}
+                </span>
+                <span className={on ? "font-medium text-stone-800" : "text-stone-600"}>{s.name}</span>
+                {s.is_baseline ? (
+                  <span className="ml-auto shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-700">基线 · 全局模型</span>
+                ) : (
+                  <span className="ml-auto shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-xs text-stone-500">个人模型 · 计额度</span>
+                )}
+              </label>
+            );
+          })}
+        </div>
+
+        <div className="mb-3 flex items-center gap-2 text-sm">
+          <span className="font-medium text-stone-700">日期范围</span>
+          <select
+            value={range}
+            onChange={(e) => {
+              setRange(e.target.value as Range);
+              setPreview(null);
+              setMsg("");
+            }}
+            className="rounded-lg border border-stone-300 bg-white px-2 py-1.5"
+          >
+            <option value="today">今天</option>
+            <option value="week">最近一周</option>
+            <option value="month">最近一月</option>
+            <option value="quarter">最近三个月</option>
+            <option value="halfyear">最近半年</option>
+            <option value="all">全部时间</option>
+          </select>
+        </div>
+
+        {preview && (
+          <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            将批量摘要 <span className="font-semibold">{preview.count}</span> 篇
+            {preview.skippedQuota > 0 && <>（另有 {preview.skippedQuota} 篇受每日额度限制跳过）</>}
+            {preview.noModel > 0 && (
+              <>（另有 {preview.noModel} 篇来自非基线来源，需先在设置页配置个人概要模型）</>
+            )}
+          </div>
+        )}
+        {msg && <p className="mb-3 text-sm text-red-600">{msg}</p>}
+
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={doPreview}
+            disabled={busy || sel.length === 0}
+            className="rounded-lg border border-amber-500 px-4 py-1.5 text-sm font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+          >
+            预览篇数
+          </button>
+          <button
+            onClick={doRun}
+            disabled={confirmDisabled}
+            className="rounded-lg bg-amber-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+          >
+            确定生成
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

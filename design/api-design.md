@@ -26,7 +26,7 @@
 | POST | `/api/sources` | 订阅 `{kind:"journal"\|"arxiv"\|"nber"\|"book", identifier}`；不存在则建档并触发首次回填 |
 | DELETE | `/api/sources/:id` | 退订（不删除源记录本身） |
 | PATCH | `/api/sources/:id` | 更新订阅设置（如补充期刊 `rss_url`） |
-| POST | `/api/sources/:id/baseline` | `{baseline: bool}` 切换基线标记，仅 admin（403 拦截）；基线源抓取+摘要由全局模型承担 |
+| POST | `/api/sources/:id/baseline` | `{baseline: bool}` 切换基线标记，仅 admin（403 拦截）；基线源抓取+摘要由全局模型承担。设 `true` 时存量无概要文章全部以基线优先级回填队（响应含 `enqueued` 篇数；历史遗留的低优先级个人任务同步升级为基线任务并计入）；设 `false` 时删除该源未开始的基线任务（响应含 `cancelled` 篇数，已完成概要保留） |
 | POST | `/api/sources/:id/refresh` | 手动刷新单个源 |
 | POST | `/api/sources/refresh-all` | 手动刷新全部订阅源（防抖 60s） |
 
@@ -34,7 +34,9 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/articles` | 信息流分页。参数：`source_id`、`platform`、`range=today\|week\|month\|quarter\|halfyear\|all`（默认 month，过滤优先用发表日期）、`read=0\|1`、`oa=1`、`cursor`、`q`（搜索：英文/中文标题、来源名，LIKE 参数化）、`kinds=journal,arxiv,nber`（来源类型多选）、`types=`（论文类型五分类多选，对概要 paper_types JSON 匹配）、`id=`（单篇查询，供卡片轮询待摘要状态，提供时忽略分页/筛选参数）。每条含快速概要与资源状态 |
+| GET | `/api/articles` | 信息流分页。参数：`source_id`、`platform`、`range=today\|week\|month\|quarter\|halfyear\|all`（默认 month，过滤优先用发表日期）、`read=0\|1`、`oa=1`、`cursor`、`q`（搜索：英文/中文标题、来源名，LIKE 参数化）、`kinds=journal,arxiv,nber`（来源类型多选）、`types=`（论文类型五分类多选，对概要 paper_types JSON 匹配）、`sources=`（具体来源 id 多选，仅限本人订阅，与类别/类型筛选 AND 叠加）、`sort=ingest\|published\|source\|brief`（默认 ingest）、`dir=asc\|desc`（默认 desc，键集游标翻页）、`id=`（单篇查询，供卡片轮询待摘要状态，提供时忽略分页/筛选参数）。每条含快速概要与资源状态 |
+| POST | `/api/articles/batch-brief/preview` | 批量摘要预览 `{sourceIds:[], range}`（缺省全时间）：统计订阅范围内尚无概要的文章，返回 `{count, skippedQuota, noModel}`（不落库） |
+| POST | `/api/articles/batch-brief` | 批量摘要执行：基线源文章以 `baseline` 优先级入队；非基线源用触发者个人模型（`personalBatch` 优先级）并计入每日额度，超额跳过，返回同结构 |
 | GET | `/api/articles/updates?since=<ISO时间>` | 增量探测：返回新文章数量（登录刷新完成后的顶部提示） |
 | GET | `/api/articles/:id` | 详情（全文摘要、作者、卷期、概要、资源列表） |
 | POST | `/api/articles/:id/brief` | 手动触发快速概要（基线分层）：已配置个人概要模型 → 以手动优先级入队并归属当前用户（豁免每日额度），201；未配置 → 400 提示去设置页 |
@@ -89,6 +91,7 @@
 | --- | --- | --- |
 | GET | `/api/settings` | 当前用户偏好；另返 `account:{name, email, role, verified}` 供设置页账号区 |
 | PATCH | `/api/settings` | `{autoRefreshOnLogin, refreshIntervalMin, defaultLang, obsidianVaultPath?}`；`obsidianVaultPath` 为阅读笔记平台预留，接受但功能未启用 |
+| POST | `/api/settings/vault-check` | Obsidian vault 目录校验 `{path}`：服务端 `fs.stat` 存在 + 是目录 + 含 `.obsidian` 子目录，返回 `{ok, reason}`；仅应用运行于本机时有效 |
 | PATCH | `/api/settings/profile` | 修改昵称 `{name}`（1–64 字符） |
 | POST | `/api/settings/password` | 修改密码 `{oldPassword, newPassword}`：校验旧密码，新密码强度同注册规则 |
 | GET | `/api/settings/llm` | 模型配置：brief（全局最新一条）/ briefPersonal（本人 `brief_personal` 槽）/ notes（本人），Key 仅回显掩码；含 `isAdmin`、`briefEnvFallback`、`briefEffective` |
@@ -111,12 +114,15 @@
 | GET/POST | `/api/admin/users` | 用户列表 `{id,name,email,role,verified,createdAt}` / 创建账号（直接已验证，随机密码一次性回显） |
 | PATCH | `/api/admin/users/:id` | `{role?, verified?}`：升降角色（不可降级自己）；手动标记已验证 |
 
-## 8. 预留模块约定（会议 / 基金 / 项目 / 笔记）
+## 8. 预留模块约定（会议 / 基金 / 项目）与阅读笔记材料
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/modules` | 模块注册表：`[{key, route, label, status:"active"\|"planned"}]`，导航据此渲染 |
-| ANY | `/api/conferences/*`、`/api/funding/*`、`/api/projects/*`、`/api/notes/*` | 未启用前统一返回 501 `{error:"模块规划中"}`；启用后沿用本文档鉴权、校验与错误码约定 |
+| GET | `/api/notes/materials` | 当前用户已上传的笔记材料列表 `[{id, kind, originalName, size, createdAt}]` |
+| POST | `/api/notes/materials` | multipart `{kind:"main"\|"attachment", file}`：正文仅 `.pdf/.epub`，附件仅 `.pdf/.zip`，单文件 ≤50MB；存 `data/note-materials/YYYYMM/<uuid>.<ext>` 入库 `note_materials` |
+| DELETE | `/api/notes/materials/:id` | 删除材料（仅本人）：删库同时删文件 |
+| ANY | `/api/conferences/*`、`/api/funding/*`、`/api/projects/*` 及 `/api/notes/*` 其他路径 | 未启用前统一返回 501 `{error:"模块规划中"}`；启用后沿用本文档鉴权、校验与错误码约定 |
 
 ## 9. 错误码约定
 

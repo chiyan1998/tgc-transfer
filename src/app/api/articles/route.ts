@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/server/api-utils";
 import { articlesRepo, briefsRepo } from "@/server/db/repositories/articles";
-import { sourcesRepo } from "@/server/db/repositories/sources";
+import { sourcesRepo, subscriptionsRepo } from "@/server/db/repositories/sources";
 import { PAPER_TYPE_KEYS } from "@/server/pipeline/paper-types";
 
 const KIND_ALLOW = ["journal", "arxiv", "nber"];
@@ -21,6 +21,12 @@ const query = z.object({
   kinds: z.string().max(100).optional(),
   /** 论文类型，逗号分隔 */
   types: z.string().max(200).optional(),
+  /** 排序字段（默认入库时间） */
+  sort: z.enum(["ingest", "published", "source", "brief"]).default("ingest"),
+  /** 排序方向（默认降序） */
+  dir: z.enum(["asc", "desc"]).default("desc"),
+  /** 具体来源多选，逗号分隔（仅限本人订阅） */
+  sources: z.string().max(500).optional(),
 });
 
 export async function GET(req: Request) {
@@ -29,6 +35,18 @@ export async function GET(req: Request) {
   const parsed = query.safeParse(Object.fromEntries(new URL(req.url).searchParams));
   if (!parsed.success) return NextResponse.json({ error: "参数校验失败" }, { status: 422 });
   const q = parsed.data;
+
+  // 具体来源多选：仅保留本人已订阅的源，防止越权查询
+  const sourceIds = q.sources
+    ?.split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  let filterSourceIds: number[] | undefined;
+  if (sourceIds?.length) {
+    const subscribed = new Set(subscriptionsRepo.listByUser(user.id).map((s) => s.id));
+    filterSourceIds = sourceIds.filter((id) => subscribed.has(id));
+    if (!filterSourceIds.length) return NextResponse.json({ data: { items: [], nextCursor: null } });
+  }
 
   // 单篇查询：复用下方组装逻辑，强制 limit=1 且不走游标（id 升序游标不适用）
   const rows = q.id
@@ -41,9 +59,12 @@ export async function GET(req: Request) {
     cursor: q.cursor,
     limit: q.limit,
     sourceId: q.source_id,
+    sourceIds: filterSourceIds,
     range: q.range,
     oaOnly: q.oa === 1,
     q: q.q,
+    sort: q.sort,
+    dir: q.dir,
     kinds: q.kinds
       ?.split(",")
       .map((s) => s.trim())

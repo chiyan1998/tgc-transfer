@@ -210,7 +210,13 @@ export function Sources() {
       setMessage(String(data?.error ?? "设置失败"));
       return;
     }
-    setMessage(`「${s.name}」${!s.is_baseline ? "已标记为基线源（全局模型自动摘要）" : "已取消基线标记"}`);
+    const enqueued = Number(data?.data?.enqueued ?? 0);
+    const cancelled = Number(data?.data?.cancelled ?? 0);
+    setMessage(
+      !s.is_baseline
+        ? `「${s.name}」已标记为基线源（全局模型自动摘要）${enqueued > 0 ? `，已加入 ${enqueued} 篇待摘要，稍后自动出概要` : ""}`
+        : `「${s.name}」已取消基线标记${cancelled > 0 ? `，已作废 ${cancelled} 个未开始的摘要任务` : ""}`
+    );
     await loadSubscribed();
   }
 
